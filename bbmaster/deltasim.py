@@ -3,19 +3,21 @@ import healpy as hp
 import pymaster as nmt
 import copy
 import sys
-
+import os
 
 class DeltaBbl(object):
     def __init__(self, nside, dsim, filt, bins, lmin=2, lmax=None, pol=False, 
-                 nsim_per_ell=10, interp_ells=None, seed0=1000, n_iter=0):
+                 nsim_per_ell=10, interp_ells=None, seed0=1000, n_iter=0, mode=0, save_maps = False, 
+                 outdir=None, indir=None, in_name=None, nside_high=None, obsmat=None, beam=None): 
+        # input beam in degrees.
         if not isinstance(dsim, dict):
             raise TypeError("For now delta simulators can only be "
                             "specified through a dictionary.")
-
+    
         if not isinstance(filt, dict):
             raise TypeError("For now filtering operations can only be "
                             "specified through a dictionary.")
-
+    
         if not isinstance(bins, nmt.NmtBin):
             raise TypeError("`bins` must be a NaMaster NmtBin object.")
         self.dsim_d = copy.deepcopy(dsim)
@@ -40,12 +42,22 @@ class DeltaBbl(object):
         self.alm_ord = hp.Alm()
         self._sqrt2 = np.sqrt(2.)
         self._oosqrt2 = 1/self._sqrt2
-        
+        self.mode = mode
+        self.save_maps = save_maps
+        self.outdir = outdir
+        self.indir = indir
+        self.in_name = in_name
+        self.lmax_frombins = self.bins.get_ell_max(self.n_bins-1) # this is the last ell in the bins object
+        if self.pol:
+            self.cb_ell = np.zeros((4,4,self.lmax+1,self.lmax+1))
+        self.errors = None
+        self.obsmat = obsmat
+        self.nside_high = nside_high
+        self.beam = np.radians(beam)
+    
     def _prepare_filtering(self):
         # Match pixel resolution
-        self.filt_d['mask'] = hp.ud_grade(self.filt_d['mask'], 
-                                          nside_out=self.nside)
-
+        self.filt_d['mask'] = hp.ud_grade(self.filt_d['mask'],nside_out=self.nside)
     def _gen_gaussian_map_old(self, ell):
         if self.pol:
             # We want to excite E (B) modes in Gaussian maps using healpy,
@@ -89,81 +101,76 @@ class DeltaBbl(object):
                                     size=6*(ell+1)).reshape([3,2,ell+1])
             rans[:, 0, 0] *= self._sqrt2
             rans[:, 1, 0] = 0
-            
+    
             for im, ip, pk in self._rands_iterator():
                 alms[im,ip,1,idx] = rans[pk[0],0] + 1j*rans[pk[0],1]
                 alms[im,ip,2,idx] = rans[pk[1],0] + 1j*rans[pk[1],1]
                 map_out[im,ip] = hp.alm2map(alms[im,ip], self.nside)[1:]
         else:
-            alms = np.zeros(self.alm_ord.getsize(3*self.nside-1),
-                            dtype='complex128')
-            rans = np.random.normal(0, self._oosqrt2, 
-                                    size=2*(ell+1)).reshape([2,ell+1])
+            alms = np.zeros(self.alm_ord.getsize(3*self.nside-1),dtype='complex128')
+            rans = np.random.normal(0, self._oosqrt2, size=2*(ell+1)).reshape([2,ell+1])
             rans[0, 0] *= self._sqrt2
             rans[1, 0] = 0
-            alms[idx] = rans[0] + 1j*rans[1]
-            # TODO: we can save time on the SHT massively, since in this case 
-            # there is no sum over ell!
-            map_out = hp.alm2map(alms, self.nside)
-        return map_out
-
-    def _gen_Z2_map(self, ell):
-        # Analogous to Gaussian
-        idx = self.alm_ord.getidx(3*self.nside-1, ell, np.arange(ell+1))
-        if self.pol:
-            # shape (map1,map2; EE,EB,BE,BB; Q,U; ipix)
-            map_out = np.zeros((2,4,2,self.npix)) 
-            alms = np.zeros((2,4,3,self.alm_ord.getsize(3*self.nside-1)),
-                            dtype='complex128')
-            # We only need to pick from three independent sets of alms
-            rans = self._oosqrt2*(
-                2*np.random.binomial(1,0.5,size=6*(ell+1))-1
-            ).reshape([3,2,ell+1])
-            rans[:, 0, 0] *= self._sqrt2
-            rans[:, 1, 0] = 0
-            
-            for im, ip, pk in self._rands_iterator():
-                alms[im,ip,1,idx] = rans[pk[0],0] + 1j*rans[pk[0],1]
-                alms[im,ip,2,idx] = rans[pk[1],0] + 1j*rans[pk[1],1]
-                map_out[im,ip] = hp.alm2map(alms[im,ip], self.nside)[1:]
-        else:
-            rans = self._oosqrt2*(
-                2*np.random.binomial(1,0.5,size=2*(ell+1))-1
-            ).reshape([2,ell+1])
-            # Correct m=0 (it should be real and have twice as much variance)
-            rans[0, 0] *= self._sqrt2
-            rans[1, 0] = 0
-            # Populate alms and transform to map
-            alms = np.zeros(self.alm_ord.getsize(3*self.nside-1),
-                            dtype='complex128')
             alms[idx] = rans[0] + 1j*rans[1]
             # TODO: we can save time on the SHT massively, since in this case 
             # there is no sum over ell!
             map_out = hp.alm2map(alms, self.nside)
         return map_out
     
-    def _gen_Z2_alm(self, ell):
-        idx = self.alm_ord.getidx(3*self.nside-1, ell, 
-                                  np.arange(ell+1))
-        if self.pol:    # Z2 alms (TEB)        
-            for ipol_in in range(2):
-                alms = np.zeros((3, self.alm_ord.getsize(3*self.nside-1)),
-                                dtype='complex128')
-                rans = self._oosqrt2*(2*np.random.binomial(1,0.5, 
-                                                           size=2*(ell+1))-1).reshape([2,ell+1])
+    def _gen_Z2_map(self, ell):
+        # Analogous to Gaussian
+        if self.mode in [0,1]:
+            idx = self.alm_ord.getidx(3*self.nside-1, ell, np.arange(ell+1))
+            if self.pol:
+                # shape (map1,map2; EE,EB,BE,BB; Q,U; ipix)
+                map_out = np.zeros((2,4,2,self.npix)) 
+                alms = np.zeros((2,4,3,self.alm_ord.getsize(3*self.nside-1)),dtype='complex128')
+                # We only need to pick from three independent sets of alms
+                rans = self._oosqrt2*(2*np.random.binomial(1,0.5,size=6*(ell+1))-1).reshape([3,2,ell+1])
+                rans[:, 0, 0] *= self._sqrt2
+                rans[:, 1, 0] = 0
+                for im, ip, pk in self._rands_iterator():
+                    alms[im,ip,1,idx] = rans[pk[0],0] + 1j*rans[pk[0],1]
+                    alms[im,ip,2,idx] = rans[pk[1],0] + 1j*rans[pk[1],1]                
+                    map_out[im,ip] = hp.alm2map(alms[im,ip], self.nside, pixwin=True)[1:]
+            else:
+                rans = self._oosqrt2*(2*np.random.binomial(1,0.5,size=2*(ell+1))-1).reshape([2,ell+1])
+                # Correct m=0 (it should be real and have twice as much variance)
                 rans[0, 0] *= self._sqrt2
                 rans[1, 0] = 0
-                alms[ipol_in+1,idx] = rans[0] + 1j*rans[1]
-        else:
-            rans = self._oosqrt2*(2*np.random.binomial(1,0.5,
-                                                       size=2*(ell+1))-1).reshape([2,ell+1])
-            rans[0, 0] *= self._sqrt2
-            rans[1, 0] = 0
-            alms = np.zeros(self.alm_ord.getsize(3*self.nside-1),
-                            dtype='complex128')
-            alms[idx] = rans[0] + 1j*rans[1]
-        return alms
-
+                # Populate alms and transform to map
+                alms = np.zeros(self.alm_ord.getsize(3*self.nside-1),dtype='complex128')
+                alms[idx] = rans[0] + 1j*rans[1]
+                # TODO: we can save time on the SHT massively, since in this case 
+                # there is no sum over ell!
+                map_out = hp.alm2map(alms, self.nside, pixwin=True)
+        elif self.mode==3:
+            idx = self.alm_ord.getidx(3*self.nside_high-1, ell, np.arange(ell+1))
+            if self.pol:
+                # shape (map1,map2; EE,EB,BE,BB; Q,U; ipix)
+                map_out = np.zeros((2,4,3,12*self.nside**2)) 
+                alms = np.zeros((2,4,3,self.alm_ord.getsize(3*self.nside_high-1)),dtype='complex128')
+                # We only need to pick from three independent sets of alms
+                rans = self._oosqrt2*(2*np.random.binomial(1,0.5,size=6*(ell+1))-1).reshape([3,2,ell+1])
+                rans[:, 0, 0] *= self._sqrt2
+                rans[:, 1, 0] = 0
+                for im, ip, pk in self._rands_iterator():
+                    alms[im,ip,1,idx] = rans[pk[0],0] + 1j*rans[pk[0],1]
+                    alms[im,ip,2,idx] = rans[pk[1],0] + 1j*rans[pk[1],1]                
+                    map_out[im,ip] = hp.ud_grade(hp.alm2map(alms[im,ip], self.nside_high, pixwin=True, fwhm=self.beam), self.nside)                        
+            else:
+                rans = self._oosqrt2*(2*np.random.binomial(1,0.5,size=2*(ell+1))-1).reshape([2,ell+1])
+                # Correct m=0 (it should be real and have twice as much variance)
+                rans[0, 0] *= self._sqrt2
+                rans[1, 0] = 0
+                # Populate alms and transform to map
+                alms = np.zeros(self.alm_ord.getsize(3*self.nside_high-1),dtype='complex128')
+                alms[idx] = rans[0] + 1j*rans[1]
+                # TODO: we can save time on the SHT massively, since in this case 
+                # there is no sum over ell!
+                map_out = hp.alm2map(alms, self.nside_high, pixwin=True, fwhm=self.beam)
+        return map_out
+    
     def _dsim_default(self, seed, ell):
         np.random.seed(seed)
         if self.dsim_d['stats'] == 'Gaussian':
@@ -172,101 +179,221 @@ class DeltaBbl(object):
             return self._gen_Z2_map(ell)
         else:
             raise ValueError("Only Gaussian and Z2 sims implemented")
-
+    
     def _filt_default(self, mp_true):
-        if self.pol:
-            assert(mp_true.shape==(2,4,2,self.npix))
-            map_out = self.filt_d['mask'][None,None,None,:]*mp_true
+        if self.mode == 0:
+            if self.pol:
+                assert(mp_true.shape==(2,4,2,self.npix))
+                map_out = self.filt_d['mask'][None,None,None,:]*mp_true
+            else:
+                map_out = self.filt_d['mask']*mp_true
+        if self.mode == 3:
+            if self.pol:
+                assert(mp_true.shape==(2,4,3,self.npix))
+                map_out = np.zeros((2,4,3,self.npix))
+                # filter with the obsmat
+                for ii in range(2):
+                    for jj in range(4):
+                        mp_true_nest = hp.reorder(mp_true[ii,jj], r2n=True)
+                        mp_filt_nest = self.obsmat.apply(mp_true_nest)
+                        mp_filt = hp.reorder(mp_filt_nest, n2r=True)
+                        map_out[ii,jj] = self.filt_d['mask'][None,None,None,:] * mp_filt
+        elif self.mode == 2:
+            if self.pol:
+                assert(mp_true.shape==(2,4,2,self.npix))
+                map_out = self.filt_d['mask'][None,None,None,:]*mp_true
+            else:
+                map_out = self.filt_d['mask']*mp_true
         else:
-            map_out = self.filt_d['mask']*mp_true
+            raise ValueError("Error")
         return map_out
-
+    
     def gen_deltasim(self, seed, ell):
-        dsim_true = self.dsim(seed, ell)
-        dsim_filt = self.filt(dsim_true)
+        if self.mode in [0,3]: # mode 0 is the default
+            dsim_true = self.dsim(seed, ell)
+            # dsim_true is the map for seed and ell
+        elif self.mode==1:
+            dsim_true = self.dsim(seed, ell)
+            if self.save_maps:
+                # we save the map
+                if self.outdir is None:
+                    raise ValueError("You want to save the maps but forgot to define an output")
+                outdir = self.outdir + '/ell%04i/'%ell
+                if not os.path.exists(outdir):
+                    os.makedirs(outdir)
+                output = outdir + 'map_tqu_nside%i_%s_ell%04i_seed%0i_map%i.fits'
+                for im, ip, pk in self._rands_iterator():
+                    map_ = np.zeros((3,12*self.nside**2))
+                    map_[1] = dsim_true[im,ip,0] # this is Q
+                    map_[2] = dsim_true[im,ip,1] # this is U
+                    if ip==0:
+                        label = 'EE'
+                    elif ip==1:
+                        label = 'EB'
+                    elif ip==2:
+                        label = 'BE'
+                    elif ip==3:
+                        label = 'BB'
+                    hp.write_map(output%(self.nside,label,ell,seed,im+1),map_,dtype=np.single, overwrite=True,column_units='K')
+            dsim_filt = None
+        if self.mode in [0,3]:
+            dsim_filt = self.filt(dsim_true)
+        elif self.mode==1:
+            pass
+        elif self.mode==2:
+            dsim_true = np.zeros((2,4,2,self.npix))
+            for im, ip, pk in self._rands_iterator():
+                if ip==0:
+                    label = 'EE'
+                elif ip==1:
+                    label = 'EB'
+                elif ip==2:
+                    label = 'BE'
+                elif ip==3:
+                    label = 'BB'
+                name_file = self.indir + '/ell%04i/'%ell + self.in_name%(label,ell,seed,im+1)
+                dsim_true[im,ip] = hp.read_map(name_file,field=(1,2))
+            dsim_filt = self.filt(dsim_true)
+        else:
+            raise ValueError("Mode parameter invalid")
         return dsim_filt 
     
     def gen_deltasim_bpw(self, seed, ell):
-        dsim = self.gen_deltasim(seed, ell)
-        if self.pol:
-            assert(dsim.shape==(2,4,2,self.npix))
-            # cb has shape (EE,EB,BE,BB)_out, bpw_out, (EE,EB,BE,BB)_in
-            cb = np.zeros((4,self.n_bins,4))
-            pols = [(0,0),(0,1),(1,0),(1,1)]
-            for ipol_in, (ip1,ip2) in enumerate(pols):
-                tqu1 = np.concatenate((np.zeros((1,self.npix)), dsim[0,ipol_in]))
-                tqu2 = np.concatenate((np.zeros((1,self.npix)), dsim[1,ipol_in]))
-                
-                # anafast only outputs EB, not BE for 2 polarized input maps. We
-                # can generalize this using map2alm + alm2cl instead.
-                alm1 = hp.map2alm(tqu1)[1:] # alm_EB
-                alm2 = hp.map2alm(tqu2)[1:] # alm_EB
-                for ipol_out, (iq1,iq2) in enumerate(pols):
-                    cb[ipol_out, :, ipol_in] = self.bins.bin_cell(
-                        hp.alm2cl(alm1[iq1], alm2[iq2])
-                    )
-        else:
-            cb = self.bins.bin_cell(hp.anafast(dsim, iter=self.n_iter))
+        if self.mode in [0,3]:
+            dsim = self.gen_deltasim(seed, ell)
+            if self.pol:
+                assert(dsim.shape==(2,4,3,self.npix))
+                # cb has shape (EE,EB,BE,BB)_out, bpw_out, (EE,EB,BE,BB)_in
+                cb = np.zeros((4,self.n_bins,4))
+                pols = [(0,0),(0,1),(1,0),(1,1)]
+                for ipol_in, (ip1,ip2) in enumerate(pols):
+                    #tqu1 = np.concatenate((np.zeros((1,self.npix)), dsim[0,ipol_in]))
+                    #tqu2 = np.concatenate((np.zeros((1,self.npix)), dsim[1,ipol_in]))
+                    # anafast only outputs EB, not BE for 2 polarized input maps. We
+                    # can generalize this using map2alm + alm2cl instead.
+                    alm1 = hp.map2alm(dsim[0,ipol_in])[1:] # alm_EB
+                    alm2 = hp.map2alm(dsim[1,ipol_in])[1:] # alm_EB
+                    for ipol_out, (iq1,iq2) in enumerate(pols):
+                        cb[ipol_out, :, ipol_in] = self.bins.bin_cell(
+                            hp.alm2cl(alm1[iq1], alm2[iq2])
+                        )
+            else:
+                cb = self.bins.bin_cell(hp.anafast(dsim, iter=self.n_iter))
+        elif self.mode==1 and self.gen_deltasim(seed, ell)==None:
+            dsim = self.gen_deltasim(seed, ell)
+            cb = None
+        elif self.mode==2:
+            dsim = self.gen_deltasim(seed, ell)
+            if self.pol:
+                assert(dsim.shape==(2,4,2,self.npix))
+                # cb has shape (EE,EB,BE,BB)_out, bpw_out, (EE,EB,BE,BB)_in
+                cb = np.zeros((4,self.n_bins,4))
+                pols = [(0,0),(0,1),(1,0),(1,1)]
+                for ipol_in, (ip1,ip2) in enumerate(pols):
+                    tqu1 = np.concatenate((np.zeros((1,self.npix)), dsim[0,ipol_in]))
+                    tqu2 = np.concatenate((np.zeros((1,self.npix)), dsim[1,ipol_in]))
+                    # anafast only outputs EB, not BE for 2 polarized input maps. We
+                    # can generalize this using map2alm + alm2cl instead.
+                    alm1 = hp.map2alm(tqu1)[1:] # alm_EB
+                    alm2 = hp.map2alm(tqu2)[1:] # alm_EB
+                    for ipol_out, (iq1,iq2) in enumerate(pols):
+                        cells_ = hp.alm2cl(alm1[iq1], alm2[iq2],lmax=(3*self.nside-1))
+                        cb[ipol_out, :, ipol_in] = self.bins.bin_cell(cells_[:self.lmax_frombins+1])
+                        self.cb_ell[ipol_out,ipol_in,ell,:] += cells_[:self.lmax+1] / self.nsim_per_ell
+            else:
+                cb = self.bins.bin_cell(hp.anafast(dsim, iter=self.n_iter))
         return cb
-
+    
     def gen_Bbl_at_ell(self, ell):
-        if self.pol:
-            # Bbl has shape pol_out, bpw_out, pol_in
-            Bbl = np.zeros((4,self.n_bins,4))
-        else:
-            Bbl = np.zeros(self.n_bins)
-        for i in range(self.nsim_per_ell):
-            sys.stdout.write(f'\rell={ell}/{self.lmax}: sim {i} of {self.nsim_per_ell}')
-            sys.stdout.flush()
-            seed = ell*self.nsim_per_ell + i
-            cb = self.gen_deltasim_bpw(seed, ell)
-            Bbl += cb
-        Bbl /= self.nsim_per_ell
-        return Bbl
-
+        if self.mode in [0,2,3]:
+            if self.pol:
+                # Bbl has shape pol_out, bpw_out, pol_in
+                Bbl = np.zeros((self.nsim_per_ell,4,self.n_bins,4))
+            else:
+                Bbl = np.zeros((self.nsim_per_ell,self.n_bins))
+            for i in range(self.nsim_per_ell):
+                sys.stdout.write(f'\rell={ell}/{self.lmax}: sim {i+1} of {self.nsim_per_ell}')
+                sys.stdout.flush()
+                seed = self.seed0 + ell*self.nsim_per_ell + i
+                cb = self.gen_deltasim_bpw(seed, ell)
+                Bbl[i] = cb
+            #Bbl /= self.nsim_per_ell
+            return np.mean(Bbl,axis=0), np.std(Bbl,axis=0)
+        elif self.mode==1:
+            for i in range(self.nsim_per_ell):
+                sys.stdout.write(f'\rell={ell}/{self.lmax}: sim {i+1} of {self.nsim_per_ell}')
+                sys.stdout.flush()
+                seed = self.seed0 + ell*self.nsim_per_ell + i
+                cb = self.gen_deltasim_bpw(seed, ell) # we only need to run this in mode=1
+            return None, None
     def get_ells(self):
         return np.arange(self.lmin, self.lmax+1)
-
     def gen_Bbl_all(self):
-        if self.interp_ells:
-            ipl = self.interp_ells
-            ls_sampled = []
-            il_sampled = []
-            for il, l in enumerate(self.get_ells()):
-                if il%ipl == 0:
-                    ls_sampled.append(l)
-                    il_sampled.append(il)
-            ls_sampled = np.array(ls_sampled)
-            il_sampled = np.array(il_sampled)
-        else:
-            ls_sampled = self.get_ells()
-            il_sampled = np.arange(len(ls_sampled))
-        bpw_sampled = np.array([self.gen_Bbl_at_ell(l) for l in ls_sampled])
-        
-        if self.pol:
-            # arr_out has shape pol_out, bpw_out, pol_in, ell_in
-            arr_out = np.zeros((4,self.n_bins,4,self.n_ells))
-            for idx, ils in enumerate(il_sampled):
-                arr_out[:,:,:,ils] = bpw_sampled[idx]   
-            if self.interp_ells:
-                for il, l in enumerate(self.get_ells()):
-                    if l not in ls_sampled:
-                        for ip in range(4):
+        if self.mode in [0,2,3]:
+            if self.interp_ells != False:
+                # determine if interp_ells is either an integer or an array
+                if hasattr(self.interp_ells, '__iter__'):
+                    ls_sampled = []
+                    il_sampled = []
+                    for il, l in enumerate(self.get_ells()):
+                        if l in self.interp_ells:
+                            ls_sampled.append(l)
+                            il_sampled.append(il)
+                    ls_sampled = np.array(ls_sampled)
+                    il_sampled = np.array(il_sampled)
+                else:
+                    ipl = self.interp_ells
+                    ls_sampled = []
+                    il_sampled = []
+                    for il, l in enumerate(self.get_ells()):
+                        if il%ipl == 0:
+                            ls_sampled.append(l)
+                            il_sampled.append(il)
+                    ls_sampled = np.array(ls_sampled)
+                    il_sampled = np.array(il_sampled)
+            else:
+                ls_sampled = self.get_ells()
+                il_sampled = np.arange(len(ls_sampled))
+            bpw_sampled = np.array([self.gen_Bbl_at_ell(l)[0] for l in ls_sampled])
+            self.errors = {}
+            #for l in ls_sampled:
+            #    self.errors[l] = self.gen_Bbl_at_ell(l)[1]
+            if self.pol:
+                # arr_out has shape pol_out, bpw_out, pol_in, ell_in
+                arr_out = np.zeros((4,self.n_bins,4,self.n_ells))
+                for idx, ils in enumerate(il_sampled):
+                    arr_out[:,:,:,ils] = bpw_sampled[idx]   
+                if self.interp_ells != False:
+                    for il, l in enumerate(self.get_ells()):
+                        if l not in ls_sampled:
+                            for ip in range(4):
+                                for ib in range(self.n_bins):
+                                    for iq in range(4):
+                                        #print('iq', iq, 'ib', ib, 'ip', ip, 'il', il)
+                                        arr_out[iq,ib,ip,il] = np.interp(l, ls_sampled, bpw_sampled[:,iq,ib,ip])
+            else: 
+                arr_out = np.zeros((self.n_bins, self.n_ells))
+                for idx, ils in enumerate(il_sampled):
+                    arr_out[:,ils] = bpw_sampled[idx,:]
+                if self.interp_ells != False:
+                    for il, l in enumerate(self.get_ells()):
+                        if l not in ls_sampled:
                             for ib in range(self.n_bins):
-                                for iq in range(4):
-                                    #print('iq', iq, 'ib', ib, 'ip', ip, 'il', il)
-                                    arr_out[iq,ib,ip,il] = np.interp(
-                                        l, ls_sampled, 
-                                        bpw_sampled[:,iq,ib,ip]
-                                    )
-        else: 
-            arr_out = np.zeros((self.n_bins, self.n_ells))
-            for idx, ils in enumerate(il_sampled):
-                arr_out[:,ils] = bpw_sampled[idx,:]
+                                arr_out[ib,il] = np.interp(l, ls_sampled, bpw_sampled[:,ib])
+        elif self.mode==1:
             if self.interp_ells:
+                ipl = self.interp_ells
+                ls_sampled = []
+                il_sampled = []
                 for il, l in enumerate(self.get_ells()):
-                    if l not in ls_sampled:
-                        for ib in range(self.n_bins):
-                            arr_out[ib,il] = np.interp(l, ls_sampled,
-                                                       bpw_sampled[:,ib])
+                    if il%ipl == 0:
+                        ls_sampled.append(l)
+                        il_sampled.append(il)
+                ls_sampled = np.array(ls_sampled)
+                il_sampled = np.array(il_sampled)
+            else:
+                ls_sampled = self.get_ells()
+                il_sampled = np.arange(len(ls_sampled))
+            bpw_sampled = np.array([self.gen_Bbl_at_ell(l) for l in ls_sampled]) # We only need to run this for mode=1
+            arr_out = None
         return arr_out
