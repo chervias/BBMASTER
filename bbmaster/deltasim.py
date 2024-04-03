@@ -274,9 +274,9 @@ class DeltaBbl(object):
                     alm1 = hp.map2alm(dsim[0,ipol_in])[1:] # alm_EB
                     alm2 = hp.map2alm(dsim[1,ipol_in])[1:] # alm_EB
                     for ipol_out, (iq1,iq2) in enumerate(pols):
-                        cb[ipol_out, :, ipol_in] = self.bins.bin_cell(
-                            hp.alm2cl(alm1[iq1], alm2[iq2])
-                        )
+                        cells_ = hp.alm2cl(alm1[iq1], alm2[iq2],lmax=(3*self.nside-1))
+                        cb[ipol_out, :, ipol_in] = self.bins.bin_cell(cells_[:self.lmax_frombins+1])
+                        self.cb_ell[ipol_out,ipol_in,ell,:] += cells_[:self.lmax+1] / self.nsim_per_ell
             else:
                 cb = self.bins.bin_cell(hp.anafast(dsim, iter=self.n_iter))
         elif self.mode==1 and self.gen_deltasim(seed, ell)==None:
