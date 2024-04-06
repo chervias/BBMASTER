@@ -54,6 +54,7 @@ class DeltaBbl(object):
         self.obsmat = obsmat
         self.nside_high = nside_high
         self.beam = np.radians(beam)
+        self.comm = comm
     
     def _prepare_filtering(self):
         # Match pixel resolution
@@ -308,10 +309,10 @@ class DeltaBbl(object):
         if self.mode in [0,2,3]:
             if self.pol:
                 # Bbl has shape pol_out, bpw_out, pol_in
-                Bbl = np.zeros((self.nsim_per_ell/self.comm.size,4,self.n_bins,4))
+                Bbl = np.zeros((int(self.nsim_per_ell/self.comm.size),4,self.n_bins,4))
                 Bbl_final = None # this is the receiving buffer
             else:
-                Bbl = np.zeros((self.nsim_per_ell/self.comm.size,self.n_bins))
+                Bbl = np.zeros((int(self.nsim_per_ell/self.comm.size),self.n_bins))
                 Bbl_final = None # this is the receiving buffer
             counter = 0
             for i in range(self.comm.rank*self.nsim_per_ell//self.comm.size,(self.comm.rank+1)*self.nsim_per_ell//self.comm.size):
@@ -323,11 +324,10 @@ class DeltaBbl(object):
                 Bbl[counter] = cb
                 counter += 1
             # Here I have to gather
-            if rank == 0:
-                Bbl_final = np.zeros((self.comm.size, self.nsim_per_ell/self.comm.size,4,self.n_bins,4))
+            if self.comm.rank == 0:
+                Bbl_final = np.zeros((self.comm.size, int(self.nsim_per_ell/self.comm.size),4,self.n_bins,4))
             self.comm.Gather(Bbl, Bbl_final, root=0)
             if self.comm.rank == 0:
-                print('The received shape is ',Bbl_final.shape)
                 Bbl = np.reshape(Bbl_final, (self.nsim_per_ell,4,self.n_bins,4))
             #Bbl /= self.nsim_per_ell
             return np.mean(Bbl,axis=0), np.std(Bbl,axis=0)
