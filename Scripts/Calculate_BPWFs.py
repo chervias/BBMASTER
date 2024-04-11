@@ -27,8 +27,8 @@ dsim = {'stats': 'Z2'}
 obsmat = toast.ObsMat('output/obsmat_coadd-full.npz')
 print('obsmat loaded')
 
-bc_z2 = mst.DeltaBbl(nside, dsim, filt, bins, pol=True, interp_ells=False, lmin=20, lmax=110, nsim_per_ell=100, save_maps=False, mode=3, seed0=1000, obsmat=obsmat, nside_high=128, beam=0.5, comm=comm)
+bc_z2 = mst.DeltaBbl(nside, dsim, filt, bins, pol=True, interp_ells=False, lmin=20, lmax=110, nsim_per_ell=2000, save_maps=False, mode=3, seed0=1000, obsmat=obsmat, nside_high=nside, beam=0.5, mcut=None, comm=comm)
 bpw_num_z2 = bc_z2.gen_Bbl_all()
 
 if comm.rank == 0:
-        np.save('output/BPWFs_Z2_100sims_nside128_obsmat-filtered', bpw_num_z2)
+        np.save('output/BPWFs_Z2_2000sims_nside128_obsmat-filtered', bpw_num_z2)

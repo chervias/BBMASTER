@@ -8,7 +8,7 @@ import os
 class DeltaBbl(object):
     def __init__(self, nside, dsim, filt, bins, lmin=2, lmax=None, pol=False, 
                  nsim_per_ell=10, interp_ells=None, seed0=1000, n_iter=0, mode=0, save_maps = False, 
-                 outdir=None, indir=None, in_name=None, nside_high=None, obsmat=None, beam=None, comm=None): 
+                 outdir=None, indir=None, in_name=None, nside_high=None, obsmat=None, beam=None, mcut=None, comm=None): 
         # input beam in degrees.
         if not isinstance(dsim, dict):
             raise TypeError("For now delta simulators can only be "
@@ -54,6 +54,7 @@ class DeltaBbl(object):
         self.obsmat = obsmat
         self.nside_high = nside_high
         self.beam = np.radians(beam)
+        self.mcut = mcut
         self.comm = comm
     
     def _prepare_filtering(self):
@@ -192,13 +193,23 @@ class DeltaBbl(object):
             if self.pol:
                 assert(mp_true.shape==(2,4,3,self.npix))
                 map_out = np.zeros((2,4,3,self.npix))
-                # filter with the obsmat
-                for ii in range(2):
-                    for jj in range(4):
-                        mp_true_nest = hp.reorder(mp_true[ii,jj], r2n=True)
-                        mp_filt_nest = self.obsmat.apply(mp_true_nest)
-                        mp_filt = hp.reorder(mp_filt_nest, n2r=True)
-                        map_out[ii,jj] = self.filt_d['mask'][None,None,None,:] * mp_filt
+                if self.obsmat is not None:
+                    # filter with the obsmat
+                    for ii in range(2):
+                        for jj in range(4):
+                            mp_true_nest = hp.reorder(mp_true[ii,jj], r2n=True)
+                            mp_filt_nest = self.obsmat.apply(mp_true_nest)
+                            mp_filt = hp.reorder(mp_filt_nest, n2r=True)
+                            map_out[ii,jj] = self.filt_d['mask'][None,None,None,:] * mp_filt
+                elif self.mcut is not None:
+                    # filter with mcut
+                    for ii in range(2):
+                        for jj in range(4):
+                            alms_ = hp.map2alm(mp_true[ii,jj], lmax=self.lmax, pol=True)
+                            n_modes_to_filter = (self.mcut + 1) * (self.lmax + 1) - ((self.mcut + 1) * self.mcut) // 2
+                            alms_[:, :n_modes_to_filter] = 0.
+                            mp_filt = hp.alm2map(alms_, nside=self.nside, lmax=self.lmax, pol=True)
+                            map_out[ii,jj] = self.filt_d['mask'][None,None,None,:] * mp_filt
         elif self.mode == 2:
             if self.pol:
                 assert(mp_true.shape==(2,4,2,self.npix))
