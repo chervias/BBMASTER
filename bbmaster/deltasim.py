@@ -53,7 +53,8 @@ class DeltaBbl(object):
         self.errors = None
         self.obsmat = obsmat
         self.nside_high = nside_high
-        self.beam = np.radians(beam)
+        if beam is not None:
+	        self.beam = np.radians(beam)
         self.mcut = mcut
         self.comm = comm
     
@@ -124,8 +125,8 @@ class DeltaBbl(object):
         if self.mode in [0,1]:
             idx = self.alm_ord.getidx(3*self.nside-1, ell, np.arange(ell+1))
             if self.pol:
-                # shape (map1,map2; EE,EB,BE,BB; Q,U; ipix)
-                map_out = np.zeros((2,4,2,self.npix)) 
+                # shape (map1,map2; EE,EB,BE,BB; T,Q,U; ipix)
+                map_out = np.zeros((2,4,3,self.npix)) 
                 alms = np.zeros((2,4,3,self.alm_ord.getsize(3*self.nside-1)),dtype='complex128')
                 # We only need to pick from three independent sets of alms
                 rans = self._oosqrt2*(2*np.random.binomial(1,0.5,size=6*(ell+1))-1).reshape([3,2,ell+1])
@@ -134,7 +135,7 @@ class DeltaBbl(object):
                 for im, ip, pk in self._rands_iterator():
                     alms[im,ip,1,idx] = rans[pk[0],0] + 1j*rans[pk[0],1]
                     alms[im,ip,2,idx] = rans[pk[1],0] + 1j*rans[pk[1],1]                
-                    map_out[im,ip] = hp.alm2map(alms[im,ip], self.nside, pixwin=True)[1:]
+                    map_out[im,ip] = hp.alm2map(alms[im,ip], self.nside)#[1:] we comment this because we need a TQU map and not a QU map.
             else:
                 rans = self._oosqrt2*(2*np.random.binomial(1,0.5,size=2*(ell+1))-1).reshape([2,ell+1])
                 # Correct m=0 (it should be real and have twice as much variance)
@@ -145,7 +146,7 @@ class DeltaBbl(object):
                 alms[idx] = rans[0] + 1j*rans[1]
                 # TODO: we can save time on the SHT massively, since in this case 
                 # there is no sum over ell!
-                map_out = hp.alm2map(alms, self.nside, pixwin=True)
+                map_out = hp.alm2map(alms, self.nside)
         elif self.mode==3:
             idx = self.alm_ord.getidx(3*self.nside_high-1, ell, np.arange(ell+1))
             if self.pol:
@@ -185,11 +186,11 @@ class DeltaBbl(object):
     def _filt_default(self, mp_true):
         if self.mode == 0:
             if self.pol:
-                assert(mp_true.shape==(2,4,2,self.npix))
+                assert(mp_true.shape==(2,4,3,self.npix))
                 map_out = self.filt_d['mask'][None,None,None,:]*mp_true
             else:
                 map_out = self.filt_d['mask']*mp_true
-        if self.mode == 3:
+        elif self.mode == 3:
             if self.pol:
                 assert(mp_true.shape==(2,4,3,self.npix))
                 map_out = np.zeros((2,4,3,self.npix))
@@ -212,7 +213,7 @@ class DeltaBbl(object):
                             map_out[ii,jj] = self.filt_d['mask'][None,None,None,:] * mp_filt
         elif self.mode == 2:
             if self.pol:
-                assert(mp_true.shape==(2,4,2,self.npix))
+                assert(mp_true.shape==(2,4,3,self.npix))
                 map_out = self.filt_d['mask'][None,None,None,:]*mp_true
             else:
                 map_out = self.filt_d['mask']*mp_true
@@ -297,7 +298,7 @@ class DeltaBbl(object):
         elif self.mode==2:
             dsim = self.gen_deltasim(seed, ell)
             if self.pol:
-                assert(dsim.shape==(2,4,2,self.npix))
+                assert(dsim.shape==(2,4,3,self.npix))
                 # cb has shape (EE,EB,BE,BB)_out, bpw_out, (EE,EB,BE,BB)_in
                 cb = np.zeros((4,self.n_bins,4))
                 pols = [(0,0),(0,1),(1,0),(1,1)]
@@ -318,30 +319,49 @@ class DeltaBbl(object):
     
     def gen_Bbl_at_ell(self, ell):
         if self.mode in [0,2,3]:
-            if self.pol:
-                # Bbl has shape pol_out, bpw_out, pol_in
-                Bbl = np.zeros((int(self.nsim_per_ell/self.comm.size),4,self.n_bins,4))
-                Bbl_final = None # this is the receiving buffer
-            else:
-                Bbl = np.zeros((int(self.nsim_per_ell/self.comm.size),self.n_bins))
-                Bbl_final = None # this is the receiving buffer
-            counter = 0
-            for i in range(self.comm.rank*self.nsim_per_ell//self.comm.size,(self.comm.rank+1)*self.nsim_per_ell//self.comm.size):
+            if self.comm is not None:
+                if self.pol:
+                    # Bbl has shape pol_out, bpw_out, pol_in
+                    Bbl = np.zeros((int(self.nsim_per_ell/self.comm.size),4,self.n_bins,4))
+                    Bbl_final = None # this is the receiving buffer
+                else:
+                    Bbl = np.zeros((int(self.nsim_per_ell/self.comm.size),self.n_bins))
+                    Bbl_final = None # this is the receiving buffer
+                counter = 0
+                for i in range(self.comm.rank*self.nsim_per_ell//self.comm.size,(self.comm.rank+1)*self.nsim_per_ell//self.comm.size):
+                    if self.comm.rank == 0:
+                        sys.stdout.write(f'\rell={ell}/{self.lmax}: sim {i+1} of {self.nsim_per_ell}\n')
+                        sys.stdout.flush()
+                    seed = self.seed0 + ell*self.nsim_per_ell + i
+                    cb = self.gen_deltasim_bpw(seed, ell)
+                    Bbl[counter] = cb
+                    counter += 1
+                # Here I have to gather
                 if self.comm.rank == 0:
-                    sys.stdout.write(f'\rell={ell}/{self.lmax}: sim {i+1} of {self.nsim_per_ell}\n')
-                    sys.stdout.flush()
-                seed = self.seed0 + ell*self.nsim_per_ell + i
-                cb = self.gen_deltasim_bpw(seed, ell)
-                Bbl[counter] = cb
-                counter += 1
-            # Here I have to gather
-            if self.comm.rank == 0:
-                Bbl_final = np.zeros((self.comm.size, int(self.nsim_per_ell/self.comm.size),4,self.n_bins,4))
-            self.comm.Gather(Bbl, Bbl_final, root=0)
-            if self.comm.rank == 0:
-                Bbl = np.reshape(Bbl_final, (self.nsim_per_ell,4,self.n_bins,4))
-            #Bbl /= self.nsim_per_ell
-            return np.mean(Bbl,axis=0), np.std(Bbl,axis=0)
+                    Bbl_final = np.zeros((self.comm.size, int(self.nsim_per_ell/self.comm.size),4,self.n_bins,4))
+                self.comm.Gather(Bbl, Bbl_final, root=0)
+                if self.comm.rank == 0:
+                    Bbl = np.reshape(Bbl_final, (self.nsim_per_ell,4,self.n_bins,4))
+                #Bbl /= self.nsim_per_ell
+                return np.mean(Bbl,axis=0), np.std(Bbl,axis=0)
+            else:
+                if self.pol:
+                    # Bbl has shape pol_out, bpw_out, pol_in
+                    Bbl_final = np.zeros((int(self.nsim_per_ell),4,self.n_bins,4))
+                else:
+                    Bbl_final = np.zeros((int(self.nsim_per_ell),self.n_bins))
+                counter = 0
+                for i in range(self.nsim_per_ell):
+                    if i==0:
+                        sys.stdout.write(f'\rell={ell}/{self.lmax}: sim {i+1} of {self.nsim_per_ell}\n')
+                        sys.stdout.flush()
+                    seed = self.seed0 + ell*self.nsim_per_ell + i
+                    cb = self.gen_deltasim_bpw(seed, ell)
+                    Bbl_final[counter] = cb
+                    counter += 1
+                #Bbl_final = np.reshape(Bbl_final, (self.nsim_per_ell,4,self.n_bins,4))
+                #Bbl /= self.nsim_per_ell
+                return np.mean(Bbl_final,axis=0), np.std(Bbl_final,axis=0)
         elif self.mode==1:
             for i in range(self.nsim_per_ell):
                 sys.stdout.write(f'\rell={ell}/{self.lmax}: sim {i+1} of {self.nsim_per_ell}')
@@ -381,7 +401,30 @@ class DeltaBbl(object):
             self.errors = {}
             #for l in ls_sampled:
             #    self.errors[l] = self.gen_Bbl_at_ell(l)[1]
-            if self.comm.rank == 0:
+            if self.comm is None:
+                if self.pol:
+                    # arr_out has shape pol_out, bpw_out, pol_in, ell_in
+                    arr_out = np.zeros((4,self.n_bins,4,self.n_ells))
+                    for idx, ils in enumerate(il_sampled):
+                        arr_out[:,:,:,ils] = bpw_sampled[idx]   
+                    if self.interp_ells != False:
+                        for il, l in enumerate(self.get_ells()):
+                            if l not in ls_sampled:
+                                for ip in range(4):
+                                    for ib in range(self.n_bins):
+                                        for iq in range(4):
+                                            #print('iq', iq, 'ib', ib, 'ip', ip, 'il', il)
+                                            arr_out[iq,ib,ip,il] = np.interp(l, ls_sampled, bpw_sampled[:,iq,ib,ip])
+                else: 
+                    arr_out = np.zeros((self.n_bins, self.n_ells))
+                    for idx, ils in enumerate(il_sampled):
+                        arr_out[:,ils] = bpw_sampled[idx,:]
+                    if self.interp_ells != False:
+                        for il, l in enumerate(self.get_ells()):
+                            if l not in ls_sampled:
+                                for ib in range(self.n_bins):
+                                    arr_out[ib,il] = np.interp(l, ls_sampled, bpw_sampled[:,ib])
+            elif self.comm.rank == 0:
                 if self.pol:
                     # arr_out has shape pol_out, bpw_out, pol_in, ell_in
                     arr_out = np.zeros((4,self.n_bins,4,self.n_ells))
