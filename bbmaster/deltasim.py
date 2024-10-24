@@ -4,6 +4,7 @@ import pymaster as nmt
 import copy
 import sys
 import os
+from mpi4py import MPI
 
 class DeltaBbl(object):
     def __init__(self, nside, dsim, filt, bins, lmin=2, lmax=None, pol=False, 
@@ -49,7 +50,8 @@ class DeltaBbl(object):
         self.in_name = in_name
         self.lmax_frombins = self.bins.get_ell_max(self.n_bins-1) # this is the last ell in the bins object
         if self.pol:
-            self.cb_ell = np.zeros((4,4,self.lmax+1,self.lmax+1))
+            self.cb_ell = np.zeros((4,4,self.lmax+1)) # here we will accumulate per ell in each MPI job
+            self.cb_final = np.zeros((4,4,self.lmax+1,self.lmax+1)) # here we will keep the total 
         self.errors = None
         self.obsmat = obsmat
         self.nside_high = nside_high
@@ -289,7 +291,7 @@ class DeltaBbl(object):
                     for ipol_out, (iq1,iq2) in enumerate(pols):
                         cells_ = hp.alm2cl(alm1[iq1], alm2[iq2],lmax=(3*self.nside-1))
                         cb[ipol_out, :, ipol_in] = self.bins.bin_cell(cells_[:self.lmax_frombins+1])
-                        self.cb_ell[ipol_out,ipol_in,ell,:] += cells_[:self.lmax+1] / self.nsim_per_ell
+                        self.cb_ell[ipol_out,ipol_in,:] += cells_[:self.lmax+1] 
             else:
                 cb = self.bins.bin_cell(hp.anafast(dsim, iter=self.n_iter))
         elif self.mode==1 and self.gen_deltasim(seed, ell)==None:
@@ -312,12 +314,14 @@ class DeltaBbl(object):
                     for ipol_out, (iq1,iq2) in enumerate(pols):
                         cells_ = hp.alm2cl(alm1[iq1], alm2[iq2],lmax=(3*self.nside-1))
                         cb[ipol_out, :, ipol_in] = self.bins.bin_cell(cells_[:self.lmax_frombins+1])
-                        self.cb_ell[ipol_out,ipol_in,ell,:] += cells_[:self.lmax+1] / self.nsim_per_ell
+                        self.cb_ell[ipol_out,ipol_in,:] += cells_[:self.lmax+1]
             else:
                 cb = self.bins.bin_cell(hp.anafast(dsim, iter=self.n_iter))
         return cb
     
     def gen_Bbl_at_ell(self, ell):
+        #remember to clear self.cb_ell when starting with a new ell
+        self.cb_ell *= 0.0
         if self.mode in [0,2,3]:
             if self.comm is not None:
                 if self.pol:
@@ -336,13 +340,19 @@ class DeltaBbl(object):
                     cb = self.gen_deltasim_bpw(seed, ell)
                     Bbl[counter] = cb
                     counter += 1
-                # Here I have to gather
+                # Here I have to gather Bbl and reduce cb_ell
                 if self.comm.rank == 0:
                     Bbl_final = np.zeros((self.comm.size, int(self.nsim_per_ell/self.comm.size),4,self.n_bins,4))
                 self.comm.Gather(Bbl, Bbl_final, root=0)
                 if self.comm.rank == 0:
                     Bbl = np.reshape(Bbl_final, (self.nsim_per_ell,4,self.n_bins,4))
                 #Bbl /= self.nsim_per_ell
+
+                cb_ell_ = np.zeros_like(self.cb_ell)
+                self.comm.Reduce(self.cb_ell, cb_ell_, op=MPI.SUM, root=0)
+                if self.comm.rank == 0:
+                    self.cb_final[:,:,ell,:] = cb_ell_ / self.nsim_per_ell
+                
                 return np.mean(Bbl,axis=0), np.std(Bbl,axis=0)
             else:
                 if self.pol:
@@ -359,6 +369,7 @@ class DeltaBbl(object):
                     cb = self.gen_deltasim_bpw(seed, ell)
                     Bbl_final[counter] = cb
                     counter += 1
+                self.cb_final[:,:,ell,:] = self.cb_ell / self.nsim_per_ell
                 #Bbl_final = np.reshape(Bbl_final, (self.nsim_per_ell,4,self.n_bins,4))
                 #Bbl /= self.nsim_per_ell
                 return np.mean(Bbl_final,axis=0), np.std(Bbl_final,axis=0)
