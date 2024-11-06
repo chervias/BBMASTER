@@ -8,8 +8,8 @@ from mpi4py import MPI
 
 class DeltaBbl(object):
     def __init__(self, nside, dsim, filt, bins, lmin=2, lmax=None, pol=False, 
-                 nsim_per_ell=10, interp_ells=None, seed0=1000, n_iter=0, mode=0, save_maps = False, 
-                 outdir=None, indir=None, in_name=None, nside_high=None, obsmat=None, beam=None, mcut=None, comm=None): 
+                 nsim_per_ell=10, interp_ells=None, seed0=1000, n_iter=3, mode=0, save_maps = False,
+                 outdir=None, indir=None, in_name=None, obsmat=None, beam=None, mcut=None, comm=None, bin_mask=None): 
         # input beam in degrees.
         if not isinstance(dsim, dict):
             raise TypeError("For now delta simulators can only be "
@@ -48,17 +48,16 @@ class DeltaBbl(object):
         self.outdir = outdir
         self.indir = indir
         self.in_name = in_name
-        self.lmax_frombins = self.bins.get_ell_max(self.n_bins-1) # this is the last ell in the bins object
         if self.pol:
             self.cb_ell = np.zeros((4,4,self.lmax+1)) # here we will accumulate per ell in each MPI job
             self.cb_final = np.zeros((4,4,self.lmax+1,self.lmax+1)) # here we will keep the total 
         self.errors = None
         self.obsmat = obsmat
-        self.nside_high = nside_high
         if beam is not None:
 	        self.beam = np.radians(beam)
         self.mcut = mcut
         self.comm = comm
+        self.bin_mask = bin_mask
     
     def _prepare_filtering(self):
         # Match pixel resolution
@@ -128,7 +127,7 @@ class DeltaBbl(object):
             idx = self.alm_ord.getidx(3*self.nside-1, ell, np.arange(ell+1))
             if self.pol:
                 # shape (map1,map2; EE,EB,BE,BB; T,Q,U; ipix)
-                map_out = np.zeros((2,4,3,self.npix)) 
+                map_out = np.zeros((2,4,3,self.npix))
                 alms = np.zeros((2,4,3,self.alm_ord.getsize(3*self.nside-1)),dtype='complex128')
                 # We only need to pick from three independent sets of alms
                 rans = self._oosqrt2*(2*np.random.binomial(1,0.5,size=6*(ell+1))-1).reshape([3,2,ell+1])
@@ -150,11 +149,11 @@ class DeltaBbl(object):
                 # there is no sum over ell!
                 map_out = hp.alm2map(alms, self.nside)
         elif self.mode==3:
-            idx = self.alm_ord.getidx(3*self.nside_high-1, ell, np.arange(ell+1))
+            idx = self.alm_ord.getidx(3*self.nside-1, ell, np.arange(ell+1))
             if self.pol:
                 # shape (map1,map2; EE,EB,BE,BB; Q,U; ipix)
-                map_out = np.zeros((2,4,3,12*self.nside**2)) 
-                alms = np.zeros((2,4,3,self.alm_ord.getsize(3*self.nside_high-1)),dtype='complex128')
+                map_out = np.zeros((2,4,3,self.npix))
+                alms = np.zeros((2,4,3,self.alm_ord.getsize(3*self.nside-1)),dtype='complex128')
                 # We only need to pick from three independent sets of alms
                 rans = self._oosqrt2*(2*np.random.binomial(1,0.5,size=6*(ell+1))-1).reshape([3,2,ell+1])
                 rans[:, 0, 0] *= self._sqrt2
@@ -162,18 +161,20 @@ class DeltaBbl(object):
                 for im, ip, pk in self._rands_iterator():
                     alms[im,ip,1,idx] = rans[pk[0],0] + 1j*rans[pk[0],1]
                     alms[im,ip,2,idx] = rans[pk[1],0] + 1j*rans[pk[1],1]                
-                    map_out[im,ip] = hp.ud_grade(hp.alm2map(alms[im,ip], self.nside_high, pixwin=True, fwhm=self.beam), self.nside)                        
+                    map_out[im,ip] = hp.alm2map(alms[im,ip], self.nside, pixwin=True, fwhm=self.beam)
+                    #map_out[im,ip] = hp.alm2map(alms[im,ip], self.nside)
             else:
                 rans = self._oosqrt2*(2*np.random.binomial(1,0.5,size=2*(ell+1))-1).reshape([2,ell+1])
                 # Correct m=0 (it should be real and have twice as much variance)
                 rans[0, 0] *= self._sqrt2
                 rans[1, 0] = 0
                 # Populate alms and transform to map
-                alms = np.zeros(self.alm_ord.getsize(3*self.nside_high-1),dtype='complex128')
+                alms = np.zeros(self.alm_ord.getsize(3*self.nside-1),dtype='complex128')
                 alms[idx] = rans[0] + 1j*rans[1]
                 # TODO: we can save time on the SHT massively, since in this case 
                 # there is no sum over ell!
-                map_out = hp.alm2map(alms, self.nside_high, pixwin=True, fwhm=self.beam)
+                map_out = hp.alm2map(alms, self.nside, pixwin=True, fwhm=self.beam)
+                # map_out = hp.alm2map(alms, self.nside, pixwin=False)
         return map_out
     
     def _dsim_default(self, seed, ell):
@@ -213,6 +214,20 @@ class DeltaBbl(object):
                             alms_[:, :n_modes_to_filter] = 0.
                             mp_filt = hp.alm2map(alms_, nside=self.nside, lmax=self.lmax, pol=True)
                             map_out[ii,jj] = self.filt_d['mask'][None,None,None,:] * mp_filt
+            else: # this is spin 0
+                if self.mcut is not None:
+                    if self.bin_mask is not None:
+                        mp_true_masked = mp_true * self.bin_mask
+                    else:
+                        mp_true_masked = mp_true
+                    alms_ = hp.map2alm(mp_true_masked, lmax=self.lmax, pol=False)
+                    n_modes_to_filter = (self.mcut + 1) * (self.lmax + 1) - ((self.mcut + 1) * self.mcut) // 2
+                    alms_[:n_modes_to_filter] = 0.
+                    if self.bin_mask is not None:
+                        mp_filt = hp.alm2map(alms_, nside=self.nside, lmax=self.lmax, pol=False, mmax=self.lmax) * self.bin_mask
+                    else:
+                        mp_filt = hp.alm2map(alms_, nside=self.nside, lmax=self.lmax, pol=False, mmax=self.lmax)
+                    map_out = mp_filt * self.filt_d['mask']
         elif self.mode == 2:
             if self.pol:
                 assert(mp_true.shape==(2,4,3,self.npix))
@@ -290,10 +305,10 @@ class DeltaBbl(object):
                     alm2 = hp.map2alm(dsim[1,ipol_in])[1:] # alm_EB
                     for ipol_out, (iq1,iq2) in enumerate(pols):
                         cells_ = hp.alm2cl(alm1[iq1], alm2[iq2],lmax=(3*self.nside-1))
-                        cb[ipol_out, :, ipol_in] = self.bins.bin_cell(cells_[:self.lmax_frombins+1])
+                        cb[ipol_out, :, ipol_in] = self.bins.bin_cell(cells_[:self.lmax+1])
                         self.cb_ell[ipol_out,ipol_in,:] += cells_[:self.lmax+1] 
             else:
-                cb = self.bins.bin_cell(hp.anafast(dsim, iter=self.n_iter))
+                cb = self.bins.bin_cell(hp.anafast(dsim, iter=self.n_iter)[:self.lmax+1])
         elif self.mode==1 and self.gen_deltasim(seed, ell)==None:
             dsim = self.gen_deltasim(seed, ell)
             cb = None
@@ -313,7 +328,7 @@ class DeltaBbl(object):
                     alm2 = hp.map2alm(tqu2)[1:] # alm_EB
                     for ipol_out, (iq1,iq2) in enumerate(pols):
                         cells_ = hp.alm2cl(alm1[iq1], alm2[iq2],lmax=(3*self.nside-1))
-                        cb[ipol_out, :, ipol_in] = self.bins.bin_cell(cells_[:self.lmax_frombins+1])
+                        cb[ipol_out, :, ipol_in] = self.bins.bin_cell(cells_[:self.lmax+1])
                         self.cb_ell[ipol_out,ipol_in,:] += cells_[:self.lmax+1]
             else:
                 cb = self.bins.bin_cell(hp.anafast(dsim, iter=self.n_iter))
@@ -321,7 +336,8 @@ class DeltaBbl(object):
     
     def gen_Bbl_at_ell(self, ell):
         #remember to clear self.cb_ell when starting with a new ell
-        self.cb_ell *= 0.0
+        if self.pol:
+            self.cb_ell *= 0.0
         if self.mode in [0,2,3]:
             if self.comm is not None:
                 if self.pol:
@@ -340,19 +356,26 @@ class DeltaBbl(object):
                     cb = self.gen_deltasim_bpw(seed, ell)
                     Bbl[counter] = cb
                     counter += 1
-                # Here I have to gather Bbl and reduce cb_ell
-                if self.comm.rank == 0:
-                    Bbl_final = np.zeros((self.comm.size, int(self.nsim_per_ell/self.comm.size),4,self.n_bins,4))
-                self.comm.Gather(Bbl, Bbl_final, root=0)
-                if self.comm.rank == 0:
-                    Bbl = np.reshape(Bbl_final, (self.nsim_per_ell,4,self.n_bins,4))
-                #Bbl /= self.nsim_per_ell
-
-                cb_ell_ = np.zeros_like(self.cb_ell)
-                self.comm.Reduce(self.cb_ell, cb_ell_, op=MPI.SUM, root=0)
-                if self.comm.rank == 0:
-                    self.cb_final[:,:,ell,:] = cb_ell_ / self.nsim_per_ell
-                
+                if self.pol:
+                    # Here I have to gather Bbl and reduce cb_ell
+                    if self.comm.rank == 0:
+                        Bbl_final = np.zeros((self.comm.size, int(self.nsim_per_ell/self.comm.size),4,self.n_bins,4))
+                    self.comm.Gather(Bbl, Bbl_final, root=0)
+                    if self.comm.rank == 0:
+                        Bbl = np.reshape(Bbl_final, (self.nsim_per_ell,4,self.n_bins,4))
+                    #Bbl /= self.nsim_per_ell
+    
+                    cb_ell_ = np.zeros_like(self.cb_ell)
+                    self.comm.Reduce(self.cb_ell, cb_ell_, op=MPI.SUM, root=0)
+                    if self.comm.rank == 0:
+                        self.cb_final[:,:,ell,:] = cb_ell_ / self.nsim_per_ell
+                else:
+                    # Here I have to gather Bbl and reduce cb_ell
+                    if self.comm.rank == 0:
+                        Bbl_final = np.zeros((self.comm.size, int(self.nsim_per_ell/self.comm.size),self.n_bins))
+                    self.comm.Gather(Bbl, Bbl_final, root=0)
+                    if self.comm.rank == 0:
+                        Bbl = np.reshape(Bbl_final, (self.nsim_per_ell,self.n_bins))
                 return np.mean(Bbl,axis=0), np.std(Bbl,axis=0)
             else:
                 if self.pol:
@@ -369,7 +392,8 @@ class DeltaBbl(object):
                     cb = self.gen_deltasim_bpw(seed, ell)
                     Bbl_final[counter] = cb
                     counter += 1
-                self.cb_final[:,:,ell,:] = self.cb_ell / self.nsim_per_ell
+                if self.pol:
+                    self.cb_final[:,:,ell,:] = self.cb_ell / self.nsim_per_ell
                 #Bbl_final = np.reshape(Bbl_final, (self.nsim_per_ell,4,self.n_bins,4))
                 #Bbl /= self.nsim_per_ell
                 return np.mean(Bbl_final,axis=0), np.std(Bbl_final,axis=0)
