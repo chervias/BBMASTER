@@ -55,6 +55,8 @@ class DeltaBbl(object):
         self.obsmat = obsmat
         if beam is not None:
 	        self.beam = np.radians(beam)
+        else:
+            self.beam = None
         self.mcut = mcut
         self.comm = comm
         self.bin_mask = bin_mask
@@ -160,9 +162,11 @@ class DeltaBbl(object):
                 rans[:, 1, 0] = 0
                 for im, ip, pk in self._rands_iterator():
                     alms[im,ip,1,idx] = rans[pk[0],0] + 1j*rans[pk[0],1]
-                    alms[im,ip,2,idx] = rans[pk[1],0] + 1j*rans[pk[1],1]                
-                    map_out[im,ip] = hp.alm2map(alms[im,ip], self.nside, pixwin=True, fwhm=self.beam)
-                    #map_out[im,ip] = hp.alm2map(alms[im,ip], self.nside)
+                    alms[im,ip,2,idx] = rans[pk[1],0] + 1j*rans[pk[1],1]
+                    if self.beam is not None:
+                        map_out[im,ip] = hp.alm2map(alms[im,ip], self.nside, pixwin=True, fwhm=self.beam)
+                    else:
+                        map_out[im,ip] = hp.alm2map(alms[im,ip], self.nside)
             else:
                 rans = self._oosqrt2*(2*np.random.binomial(1,0.5,size=2*(ell+1))-1).reshape([2,ell+1])
                 # Correct m=0 (it should be real and have twice as much variance)
@@ -173,8 +177,10 @@ class DeltaBbl(object):
                 alms[idx] = rans[0] + 1j*rans[1]
                 # TODO: we can save time on the SHT massively, since in this case 
                 # there is no sum over ell!
-                map_out = hp.alm2map(alms, self.nside, pixwin=True, fwhm=self.beam)
-                # map_out = hp.alm2map(alms, self.nside, pixwin=False)
+                if self.beam is not None:
+                    map_out = hp.alm2map(alms, self.nside, pixwin=True, fwhm=self.beam)
+                else:
+                    map_out = hp.alm2map(alms, self.nside,)
         return map_out
     
     def _dsim_default(self, seed, ell):
@@ -209,10 +215,17 @@ class DeltaBbl(object):
                     # filter with mcut
                     for ii in range(2):
                         for jj in range(4):
-                            alms_ = hp.map2alm(mp_true[ii,jj], lmax=self.lmax, pol=True)
+                            if self.bin_mask is not None:
+                                mp_true_masked = mp_true[ii,jj] * self.bin_mask
+                            else:
+                                mp_true_masked = mp_true[ii,jj]
+                            alms_ = hp.map2alm(mp_true_masked, lmax=self.lmax, pol=True)
                             n_modes_to_filter = (self.mcut + 1) * (self.lmax + 1) - ((self.mcut + 1) * self.mcut) // 2
                             alms_[:, :n_modes_to_filter] = 0.
-                            mp_filt = hp.alm2map(alms_, nside=self.nside, lmax=self.lmax, pol=True)
+                            if self.bin_mask is not None:
+                                mp_filt = hp.alm2map(alms_, nside=self.nside, lmax=self.lmax, pol=True) * self.bin_mask
+                            else:
+                                mp_filt = hp.alm2map(alms_, nside=self.nside, lmax=self.lmax, pol=True)
                             map_out[ii,jj] = self.filt_d['mask'][None,None,None,:] * mp_filt
             else: # this is spin 0
                 if self.mcut is not None:
