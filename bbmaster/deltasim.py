@@ -207,9 +207,16 @@ class DeltaBbl(object):
                     # filter with the obsmat
                     for ii in range(2):
                         for jj in range(4):
-                            mp_true_nest = hp.reorder(mp_true[ii,jj], r2n=True)
+                            if self.bin_mask is not None:
+                                mp_true_masked = mp_true[ii,jj] * self.bin_mask
+                            else:
+                                mp_true_masked = mp_true[ii,jj]
+                            mp_true_nest = hp.reorder(mp_true_masked, r2n=True)
                             mp_filt_nest = self.obsmat.apply(mp_true_nest)
-                            mp_filt = hp.reorder(mp_filt_nest, n2r=True)
+                            if self.bin_mask is not None:
+                                mp_filt = hp.reorder(mp_filt_nest, n2r=True) * self.bin_mask
+                            else:
+                                mp_filt = hp.reorder(mp_filt_nest, n2r=True)
                             map_out[ii,jj] = self.filt_d['mask'][None,None,None,:] * mp_filt
                 elif self.mcut is not None:
                     # filter with mcut
