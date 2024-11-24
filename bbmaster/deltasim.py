@@ -164,7 +164,7 @@ class DeltaBbl(object):
                     alms[im,ip,1,idx] = rans[pk[0],0] + 1j*rans[pk[0],1]
                     alms[im,ip,2,idx] = rans[pk[1],0] + 1j*rans[pk[1],1]
                     if self.beam is not None:
-                        map_out[im,ip] = hp.alm2map(alms[im,ip], self.nside, pixwin=True, fwhm=self.beam)
+                        map_out[im,ip] = hp.alm2map(alms[im,ip], self.nside, pixwin=False, fwhm=self.beam)
                     else:
                         map_out[im,ip] = hp.alm2map(alms[im,ip], self.nside)
             else:
@@ -178,7 +178,7 @@ class DeltaBbl(object):
                 # TODO: we can save time on the SHT massively, since in this case 
                 # there is no sum over ell!
                 if self.beam is not None:
-                    map_out = hp.alm2map(alms, self.nside, pixwin=True, fwhm=self.beam)
+                    map_out = hp.alm2map(alms, self.nside, pixwin=False, fwhm=self.beam)
                 else:
                     map_out = hp.alm2map(alms, self.nside,)
         return map_out
